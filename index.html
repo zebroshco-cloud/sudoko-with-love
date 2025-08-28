@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sudoku — 9×9 with Pencil Marks</title>
+  <!-- TailwindCSS (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React UMD + Babel for JSX in-browser -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html,body { height: 100%; }
+    /* Thicker 3×3 box borders */
+    .box-b { border-bottom-width: 2px; }
+    .box-r { border-right-width: 2px; }
+    .cell { aspect-ratio: 1/1; }
+    .notes { line-height: 1.05; }
+  </style>
+</head>
+<body class="bg-white text-neutral-900">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // ================================
+    // Utilities & RNG (seeded)
+    // ================================
+    const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+    function seededRNG(seed) {
+      // xorshift32
+      let x = seed >>> 0 || 2463534242;
+      return () => {
+        x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return (x >>> 0) / 4294967296;
+      };
+    }
+    const todayKey = () => new Date().toISOString().slice(0,10); // YYYY-MM-DD
+
+    // ================================
+    // Base solved grid (valid Sudoku)
+    // We'll generate endless variants via row/col/band/stack swaps & digit remap
+    // ================================
+    const BASE_SOLUTION = [
+      [8,3,5,4,1,6,9,2,7],
+      [2,9,6,8,5,7,4,3,1],
+      [4,1,7,2,9,3,6,5,8],
+      [5,6,9,1,3,4,7,8,2],
+      [1,2,3,6,7,8,5,4,9],
+      [7,4,8,5,2,9,1,6,3],
+      [6,5,2,7,8,1,3,9,4],
+      [9,8,1,3,4,5,2,7,6],
+      [3,7,4,9,6,2,8,1,5],
+    ];
+
+    function transformSolution(seed) {
+      const rand = seededRNG(seed);
+      let g = BASE_SOLUTION.map(r => r.slice());
+      // Digit remap 1..9
+      const digits = [1,2,3,4,5,6,7,8,9];
+      for (let i=digits.length-1;i>0;i--) { const j = Math.floor(rand()*(i+1)); [digits[i],digits[j]] = [digits[j],digits[i]]; }
+      g = g.map(row => row.map(v => digits[v-1]));
+      // Row swaps within bands & band swaps
+      const swapRows = (a,b) => { const tmp = g[a]; g[a]=g[b]; g[b]=tmp; };
+      const swapCols = (a,b) => { for (let r=0;r<9;r++){ const t=g[r][a]; g[r][a]=g[r][b]; g[r][b]=t; } };
+      // swap rows within each band
+      for (let band=0; band<3; band++) {
+        const base = band*3; const r1 = base + Math.floor(rand()*3); const r2 = base + Math.floor(rand()*3);
+        swapRows(r1,r2);
+      }
+      // swap cols within stacks
+      for (let stack=0; stack<3; stack++) {
+        const base = stack*3; const c1 = base + Math.floor(rand()*3); const c2 = base + Math.floor(rand()*3);
+        swapCols(c1,c2);
+      }
+      // swap bands
+      const bandOrder = [0,1,2]; for (let i=2;i>0;i--){ const j=Math.floor(rand()*(i+1)); [bandOrder[i],bandOrder[j]]=[bandOrder[j],bandOrder[i]]; }
+      let g2 = Array.from({length:9}, () => Array(9).fill(0));
+      for (let bi=0; bi<3; bi++) for (let r=0;r<3;r++) g2[bi*3+r] = g[(bandOrder[bi])*3 + r].slice();
+      g = g2;
+      // swap stacks
+      const stackOrder = [0,1,2]; for (let i=2;i>0;i--){ const j=Math.floor(rand()*(i+1)); [stackOrder[i],stackOrder[j]]=[stackOrder[j],stackOrder[i]]; }
+      g2 = Array.from({length:9}, () => Array(9).fill(0));
+      for (let si=0; si<3; si++) for (let r=0;r<9;r++) for (let c=0;c<3;c++) g2[r][si*3+c] = g[r][(stackOrder[si])*3 + c];
+      g = g2;
+      // optional transpose
+      if (rand() < 0.5) {
+        const t = Array.from({length:9}, () => Array(9).fill(0));
+        for (let r=0;r<9;r++) for (let c=0;c<9;c++) t[c][r]=g[r][c];
+        g=t;
+      }
+      return g;
+    }
+
+    function makePuzzleFromSolution(sol, difficulty, seed) {
+      // Decide givens based on difficulty
+      const targetGivens = { Easy: 38, Medium: 32, Hard: 28, Expert: 24 }[difficulty] || 32;
+      const totalCells = 81;
+      const toRemove = clamp(totalCells - targetGivens, 20, 60);
+      const rand = seededRNG(seed);
+      const mask = Array.from({length:9}, () => Array(9).fill(true)); // true = show
+      // Start by showing all, then remove random cells until count matches
+      let shown = 81;
+      while (shown > targetGivens) {
+        const r = Math.floor(rand()*9), c = Math.floor(rand()*9);
+        if (!mask[r][c]) continue;
+        mask[r][c] = false; shown--;
+      }
+      // Build puzzle grid; 0 = empty
+      const puzzle = sol.map((row,r) => row.map((v,c) => mask[r][c] ? v : 0));
+      return puzzle;
+    }
+
+    // Helpers for Sudoku rules
+    function peers(r,c){
+      const P = new Set();
+      for (let i=0;i<9;i++){ if(i!==c) P.add(`${r},${i}`); if(i!==r) P.add(`${i},${c}`);} // row/col
+      const br = Math.floor(r/3)*3, bc = Math.floor(c/3)*3;
+      for (let rr=br; rr<br+3; rr++) for (let cc=bc; cc<bc+3; cc++) if(!(rr===r&&cc===c)) P.add(`${rr},${cc}`);
+      return Array.from(P).map(s => s.split(',').map(Number));
+    }
+
+    function allowedCandidates(board, r, c){
+      if (board[r][c] !== 0) return new Set();
+      const used = new Set();
+      for (let i=0;i<9;i++){ used.add(board[r][i]); used.add(board[i][c]); }
+      const br = Math.floor(r/3)*3, bc = Math.floor(c/3)*3;
+      for (let rr=br; rr<br+3; rr++) for (let cc=bc; cc<bc+3; cc++) used.add(board[rr][cc]);
+      const cand = new Set([1,2,3,4,5,6,7,8,9]);
+      used.forEach(v => cand.delete(v)); cand.delete(0);
+      return cand;
+    }
+
+    // ================================
+    // React App
+    // ================================
+    function App(){
+      const [mode, setMode] = useState('Daily'); // Daily | Random
+      const [difficulty, setDifficulty] = useState('Medium'); // Easy/Medium/Hard/Expert
+      const [notesMode, setNotesMode] = useState(false);
+      const [mistakes, setMistakes] = useState(0);
+      const MISTAKE_LIMIT = 3;
+      const [paused, setPaused] = useState(false);
+      const [sec, setSec] = useState(0);
+      const [seed, setSeed] = useState(() => Math.floor((Date.now()/86400000)) ); // day-based default
+
+      // Derive deterministic seed for Daily
+      const effectiveSeed = useMemo(() => {
+        if (mode === 'Daily') {
+          const base = todayKey().split('-').join('');
+          // mix difficulty into seed
+          const diffCode = {Easy:1, Medium:2, Hard:3, Expert:4}[difficulty] || 2;
+          return parseInt(base,10) * 17 + diffCode * 101;
+        } else {
+          return seed; // random seed
+        }
+      }, [mode, difficulty, seed]);
+
+      // Build solution & puzzle from seed
+      const solution = useMemo(() => transformSolution(effectiveSeed), [effectiveSeed]);
+      const puzzle = useMemo(() => makePuzzleFromSolution(solution, difficulty, effectiveSeed), [solution, difficulty, effectiveSeed]);
+
+      // Working board & pencil notes
+      const [board, setBoard] = useState(puzzle);
+      const [givenMask, setGivenMask] = useState(() => puzzle.map(row => row.map(v => v !== 0)));
+      const [notes, setNotes] = useState(() => Array.from({length:9}, () => Array.from({length:9}, () => new Set())));
+      const [sel, setSel] = useState([0,0]);
+      const [locked, setLocked] = useState(false);
+
+      // Reset state whenever puzzle changes (seed/mode/difficulty)
+      useEffect(() => {
+        setBoard(puzzle.map(r => r.slice()));
+        setGivenMask(puzzle.map(row => row.map(v => v !== 0)));
+        setNotes(Array.from({length:9}, () => Array.from({length:9}, () => new Set())));
+        setSel([0,0]);
+        setMistakes(0);
+        setSec(0);
+        setPaused(false);
+        setLocked(false);
+      }, [puzzle]);
+
+      // Timer
+      useEffect(() => {
+        if (paused || locked) return;
+        const t = setInterval(() => setSec(s => s+1), 1000);
+        return () => clearInterval(t);
+      }, [paused, locked]);
+
+      // Persistence (localStorage)
+      useEffect(() => {
+        const key = `sudoku:${mode}:${difficulty}:${todayKey()}`;
+        const data = { mode, difficulty, board, notes: notes.map(row => row.map(set => Array.from(set))), mistakes, sec };
+        try{ localStorage.setItem(key, JSON.stringify(data)); }catch{}
+      }, [mode, difficulty, board, notes, mistakes, sec]);
+
+      // Load progress if Daily & same difficulty
+      useEffect(() => {
+        if (mode !== 'Daily') return;
+        const key = `sudoku:${mode}:${difficulty}:${todayKey()}`;
+        try{
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const d = JSON.parse(raw);
+            setBoard(d.board);
+            setNotes(d.notes.map(row => row.map(arr => new Set(arr))));
+            setMistakes(d.mistakes || 0);
+            setSec(d.sec || 0);
+          }
+        }catch{}
+      }, [mode, difficulty]);
+
+      // Derived helpers
+      const [r,c] = sel;
+      const isGiven = givenMask[r]?.[c];
+
+      function setCellValue(rr, cc, val) {
+        if (locked) return;
+        if (givenMask[rr][cc]) return; // cannot change givens
+        setBoard(prev => {
+          const next = prev.map(row => row.slice());
+          const prevVal = next[rr][cc];
+          // placing value
+          next[rr][cc] = val;
+          return next;
+        });
+      }
+
+      function placeNumber(n){
+        if (locked) return;
+        const [rr,cc] = sel;
+        if (givenMask[rr][cc]) return;
+        if (notesMode) {
+          setNotes(prev => {
+            const next = prev.map(row => row.map(s => new Set(s)));
+            if (next[rr][cc].has(n)) next[rr][cc].delete(n); else next[rr][cc].add(n);
+            return next;
+          });
+          return;
+        }
+        // normal placement: check against solution
+        const correct = solution[rr][cc] === n;
+        setCellValue(rr,cc,n);
+        // smart-notes clean-up
+        if (n!==0) {
+          // clear notes on this cell
+          setNotes(prev => {
+            const next = prev.map(row => row.map(s => new Set(s)));
+            next[rr][cc].clear();
+            // remove n from peers
+            for (const [pr,pc] of peers(rr,cc)) next[pr][pc].delete(n);
+            return next;
+          });
+        }
+        if (!correct && n!==0) {
+          setMistakes(m => {
+            const mm = m+1; if (mm >= MISTAKE_LIMIT) setLocked(true); return mm;
+          });
+        }
+      }
+
+      function erase(){
+        if (locked) return;
+        const [rr,cc]=sel; if (givenMask[rr][cc]) return;
+        setCellValue(rr,cc,0);
+      }
+
+      function autoNotes(){
+        if (locked) return;
+        setNotes(prev => {
+          const N = Array.from({length:9}, () => Array.from({length:9}, () => new Set()));
+          for (let rr=0; rr<9; rr++) for (let cc=0; cc<9; cc++){
+            if (board[rr][cc]===0) allowedCandidates(board, rr, cc).forEach(v=>N[rr][cc].add(v));
+          }
+          return N;
+        });
+      }
+
+      function hint(){
+        if (locked) return;
+        // Fill the selected cell with correct solution value if it's empty
+        const [rr,cc]=sel; if (givenMask[rr][cc]) return;
+        if (board[rr][cc]===0) {
+          placeNumber(solution[rr][cc]);
+        }
+      }
+
+      function checkMistakes(){
+        // Returns a matrix of wrong placements
+        const wrong = Array.from({length:9}, () => Array(9).fill(false));
+        let any=false;
+        for (let rr=0; rr<9; rr++) for (let cc=0; cc<9; cc++){
+          if (board[rr][cc]!==0 && board[rr][cc]!==solution[rr][cc]){ wrong[rr][cc]=true; any=true; }
+        }
+        return {wrong, any};
+      }
+
+      const solved = useMemo(() => {
+        for (let rr=0; rr<9; rr++) for (let cc=0; cc<9; cc++){
+          if (board[rr][cc] !== solution[rr][cc]) return false;
+        }
+        return true;
+      }, [board, solution]);
+
+      // Keyboard support
+      useEffect(() => {
+        const onKey = (e) => {
+          if (locked) return;
+          if (['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
+          const k = e.key;
+          if (k>='1' && k<='9') { placeNumber(parseInt(k,10)); }
+          else if (k==='Backspace' || k==='Delete') { erase(); }
+          else if (k==='n' || k==='N') { setNotesMode(n=>!n); }
+          else if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)){
+            e.preventDefault();
+            const [rr,cc]=sel; let nr=rr, nc=cc;
+            if (k==='ArrowUp') nr = clamp(rr-1,0,8);
+            if (k==='ArrowDown') nr = clamp(rr+1,0,8);
+            if (k==='ArrowLeft') nc = clamp(cc-1,0,8);
+            if (k==='ArrowRight') nc = clamp(cc+1,0,8);
+            setSel([nr,nc]);
+          }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [sel, notesMode, locked, board]);
+
+      const fmtTime = (s) => {
+        const m = Math.floor(s/60).toString().padStart(2,'0');
+        const ss = (s%60).toString().padStart(2,'0');
+        return `${m}:${ss}`;
+      };
+
+      const {wrong, any} = useMemo(() => checkMistakes(), [board, solution]);
+
+      // UI Components
+      const Cell = ({rr,cc}) => {
+        const val = board[rr][cc];
+        const given = givenMask[rr][cc];
+        const selected = rr===r && cc===c;
+        const sameRow = rr===r, sameCol = cc===c;
+        const sameBox = Math.floor(rr/3)===Math.floor(r/3) && Math.floor(cc/3)===Math.floor(c/3);
+        const sameVal = val!==0 && val===board[r][c];
+        const isWrong = wrong[rr][cc];
+        const peersSel = (sameRow || sameCol || sameBox);
+
+        const classes = [
+          'cell','w-full','h-full','border','rounded','flex','items-center','justify-center','relative','select-none',
+          selected ? 'ring-2 ring-indigo-400 border-indigo-500' : peersSel ? 'bg-indigo-50 border-neutral-300' : 'border-neutral-300',
+          given ? 'bg-neutral-100 font-semibold' : 'bg-white',
+          sameVal && !selected ? 'bg-yellow-50' : '',
+          isWrong ? 'bg-red-50 border-red-400' : ''
+        ].join(' ');
+
+        // 3×3 thin notes grid
+        const noteSet = notes[rr][cc];
+
+        return (
+          <button className={classes} onClick={() => setSel([rr,cc])} disabled={locked} aria-label={`r${rr+1}c${cc+1}`}>
+            {val!==0 ? (
+              <span className={`text-xl ${given?'text-neutral-800':'text-neutral-900'}`}>{val}</span>
+            ) : (
+              <div className="absolute inset-1 grid grid-cols-3 grid-rows-3 notes text-[10px] text-neutral-400 leading-none">
+                {Array.from({length:9}, (_,i)=>i+1).map(n => (
+                  <div key={n} className="flex items-center justify-center">{noteSet.has(n)?n:''}</div>
+                ))}
+              </div>
+            )}
+          </button>
+        );
+      };
+
+      const numberButtons = Array.from({length:9}, (_,i)=>i+1);
+
+      return (
+        <div className="p-6 max-w-6xl mx-auto">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h1 className="text-2xl font-semibold">Sudoku</h1>
+              <div className="text-sm text-neutral-500">9×9 • Notes • Daily seed • Mistake limit</div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="px-3 py-1 rounded border bg-white font-mono">⏱ {fmtTime(sec)}</div>
+              <div className="px-3 py-1 rounded border bg-white">Mistakes: {mistakes}/{MISTAKE_LIMIT}</div>
+              <button className="px-3 py-1 rounded border" onClick={()=>setPaused(p=>!p)}>{paused? 'Resume' : 'Pause'}</button>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm">Mode</span>
+              <select className="px-2 py-1 border rounded" value={mode} onChange={e=>setMode(e.target.value)}>
+                <option>Daily</option>
+                <option>Random</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm">Difficulty</span>
+              <select className="px-2 py-1 border rounded" value={difficulty} onChange={e=>setDifficulty(e.target.value)}>
+                <option>Easy</option>
+                <option>Medium</option>
+                <option>Hard</option>
+                <option>Expert</option>
+              </select>
+            </div>
+            {mode==='Random' && (
+              <button className="px-3 py-1 rounded border" onClick={()=>setSeed(Math.floor(Math.random()*1e9))}>New Random</button>
+            )}
+            <div className="w-px h-6 bg-neutral-300" />
+            <button className={`px-3 py-1 rounded border ${notesMode?'bg-indigo-600 text-white':''}`} onClick={()=>setNotesMode(n=>!n)}>
+              {notesMode ? 'Notes: ON' : 'Notes: OFF'} (N)
+            </button>
+            <button className="px-3 py-1 rounded border" onClick={autoNotes}>Auto notes</button>
+            <button className="px-3 py-1 rounded border" onClick={erase}>Erase</button>
+            <button className="px-3 py-1 rounded border" onClick={hint}>Hint</button>
+            <button className="px-3 py-1 rounded border" onClick={()=>alert(checkMistakes().any? 'There are mistakes highlighted in red.' : 'No mistakes so far!')}>Check</button>
+          </div>
+
+          {/* Board + Keypad */}
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-[minmax(0,500px)_1fr] gap-8 items-start">
+            <div>
+              <div className="grid grid-cols-9 gap-0.5 bg-neutral-300 p-0.5 rounded-lg">
+                {Array.from({length:9}, (_,rr)=> (
+                  <React.Fragment key={rr}>
+                    {Array.from({length:9}, (_,cc)=> {
+                      const extra = `${(rr%3===2)?' box-b':''} ${(cc%3===2)?' box-r':''}`;
+                      return (
+                        <div key={`${rr}-${cc}`} className={`bg-white ${extra}`}>
+                          <Cell rr={rr} cc={cc} />
+                        </div>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
+              <div className="mt-2 text-xs text-neutral-500">Click a cell, then use the keypad or your keyboard (1–9, Backspace/Delete, N to toggle notes). Smart notes auto-clean peers.</div>
+            </div>
+
+            <div>
+              <h3 className="text-sm uppercase tracking-wide text-neutral-500 mb-2">Keypad</h3>
+              <div className="grid grid-cols-3 gap-2 max-w-xs">
+                {numberButtons.map(n => (
+                  <button key={n} className="px-4 py-3 rounded border text-lg bg-white hover:bg-neutral-50" onClick={()=>placeNumber(n)}>{n}</button>
+                ))}
+                <button className="px-4 py-3 rounded border col-span-3" onClick={erase}>Erase</button>
+              </div>
+
+              <div className="mt-6">
+                <h3 className="text-sm uppercase tracking-wide text-neutral-500 mb-2">Legend</h3>
+                <ul className="text-sm list-disc pl-5 space-y-1 text-neutral-700">
+                  <li><span className="font-medium">Daily</span> uses today’s date + difficulty to pick a deterministic puzzle. Your progress auto-saves per day.</li>
+                  <li><span className="font-medium">Random</span> creates a new variant from a solved grid. Use <em>New Random</em> for another.</li>
+                  <li><span className="font-medium">Mistake limit</span> is 3. A wrong number increases the count; at the limit the board locks.</li>
+                  <li><span className="font-medium">Notes</span> toggle pencil marks in a cell. <em>Auto notes</em> fills candidates for all empties.</li>
+                  <li><span className="font-medium">Hint</span> reveals the selected cell’s correct value.</li>
+                </ul>
+              </div>
+
+              {(locked || solved) && (
+                <div className="mt-6 p-4 rounded-xl border bg-neutral-50">
+                  {solved ? (
+                    <div>
+                      <div className="text-lg font-semibold">Nice solve! 🎉</div>
+                      <div className="text-sm text-neutral-600 mt-1">Time: {fmtTime(sec)} • Mistakes: {mistakes}</div>
+                      <div className="mt-3 flex gap-2">
+                        {mode==='Random' ? (
+                          <button className="px-3 py-1 rounded border" onClick={()=>setSeed(Math.floor(Math.random()*1e9))}>New Random</button>
+                        ) : (
+                          <button className="px-3 py-1 rounded border" onClick={()=>setMode('Random')}>Play Random</button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-lg font-semibold">Reached mistake limit.</div>
+                      <div className="text-sm text-neutral-600 mt-1">You can switch to Random or change difficulty.</div>
+                      <div className="mt-3 flex gap-2">
+                        {mode==='Random' ? (
+                          <button className="px-3 py-1 rounded border" onClick={()=>{ setSeed(Math.floor(Math.random()*1e9)); setLocked(false); }}>Try New Random</button>
+                        ) : (
+                          <button className="px-3 py-1 rounded border" onClick={()=>{ setMode('Random'); setLocked(false); }}>Switch to Random</button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
